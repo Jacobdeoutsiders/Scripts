@@ -191,17 +191,6 @@ function timeout(delay = 5000) {
   })
 }
 
-function getCountryFlagEmoji(countryCode) {
-  if (countryCode.toUpperCase() === 'TW') {
-    countryCode = 'CN'
-  }
-  const codePoints = countryCode
-    .toUpperCase()
-    .split('')
-    .map(char => 127397 + char.charCodeAt())
-  return String.fromCodePoint(...codePoints)
-}
-
 function sendMessage(message) {
   return new Promise((resolve, reject) => {
     $configuration.sendMessage(message).then(
