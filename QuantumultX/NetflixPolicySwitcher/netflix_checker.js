@@ -4,10 +4,10 @@ const STATUS_NOT_AVAILABLE = 0 // 不支持解锁
 const STATUS_TIMEOUT = -1 // 检测超时
 const STATUS_ERROR = -2 // 检测异常
 
-const $ = new Env('Netflix 策略切换')
+const $ = new Env('Netflix 解锁检测')
 let policyName = $.getval('Helge_0x00.Netflix_Policy') || 'Netflix'
 let debug = $.getval('Helge_0x00.Netflix_Debug') === 'true'
-let recheck = $.getval('Helge_0x00.Netflix_Recheck') === 'true'
+let retry = $.getval('Helge_0x00.Netflix_Retry') === 'true'
 let t = parseInt($.getval('Helge_0x00.Netflix_Timeout')) || 8000
 let sortByTime = $.getval('Helge_0x00.Netflix_Sort_By_Time') === 'true'
 let concurrency = parseInt($.getval('Helge_0x00.Netflix_Concurrency')) || 10
@@ -23,89 +23,15 @@ let concurrency = parseInt($.getval('Helge_0x00.Netflix_Concurrency')) || 10
     console.log(`更新策略组名称 ➟ ${policyName}`)
     $.setval(policyName, 'Helge_0x00.Netflix_Policy')
   }
+  let candidatePolicies = lookupChildrenNode(policies, policyName)
 
-  let curPolicyPath = await getSelectedPolicy(policyName)
-  let selected = curPolicyPath[1]
-  let actualNode = curPolicyPath[curPolicyPath.length - 1]
-  if (debug) {
-    console.log(`当前选择的策略：${curPolicyPath.join(' ➤ ')}`)
+  let { fullAvailablePolicies, originalAvailablePolicies } = await testPolicies(policyName, candidatePolicies)
+  if (sortByTime) {
+    fullAvailablePolicies = fullAvailablePolicies.sort((m, n) => m.time - n.time)
+    originalAvailablePolicies = originalAvailablePolicies.sort((m, n) => m.time - n.time)
   }
-
-  let { region, status } = await test(actualNode)
-  if (status === STATUS_FULL_AVAILABLE) {
-    let flag = getCountryFlagEmoji(region) ?? ''
-    let regionName = REGIONS?.[region.toUpperCase()]?.chinese ?? ''
-    $.msg($.name, `${actualNode}`, `该节点完整支持 Netflix ➟ ${flag} ${regionName}`)
-    return
-  }
-
-  let cacheFullPolicies = []
-  try {
-    cacheFullPolicies = JSON.parse($.getval('Helge_0x00.Netflix_Full_Available_Policies') ?? '[]')
-  } catch (error) {
-    console.log('cacheFullPolicies error: ' + error)
-    cacheFullPolicies = []
-  }
-
-  let cacheOriginalPolicies = []
-  try {
-    cacheOriginalPolicies = JSON.parse($.getval('Helge_0x00.Netflix_Original_Available_Policies') ?? '[]')
-  } catch (error) {
-    console.log('cacheOriginalPolicies error: ' + error)
-    cacheOriginalPolicies = []
-  }
-
-  let paths = lookupPath(policies, policyName)
-  let nodes = new Set(paths.map(path => path[path.length - 1]).filter(item => !['proxy', 'direct', 'reject'].includes(item)))
-
-  // 检测一遍缓存的可用子策略是否还在当前策略中
-  cacheFullPolicies = cacheFullPolicies.filter(item => nodes.has(item.policy) && item.policy !== selected)
-  cacheOriginalPolicies = cacheOriginalPolicies.filter(item => nodes.has(item.policy) && item.policy !== selected)
-
-  // 切换前重新检测是否可用
-  if (recheck) {
-    let recheckPolicies = [...cacheFullPolicies.map(item => item.policy), ...cacheOriginalPolicies.map(item => item.policy)]
-    let { fullAvailablePolicies, originalAvailablePolicies } = await testPolicies(recheckPolicies)
-    cacheFullPolicies = fullAvailablePolicies
-    cacheOriginalPolicies = originalAvailablePolicies
-    if (sortByTime) {
-      cacheFullPolicies = cacheFullPolicies.sort((m, n) => m.time - n.time)
-      cacheOriginalPolicies = cacheOriginalPolicies.sort((m, n) => m.time - n.time)
-    }
-  }
-
-  $.setval(JSON.stringify(cacheFullPolicies), 'Helge_0x00.Netflix_Full_Available_Policies')
-  $.setval(JSON.stringify(cacheOriginalPolicies), 'Helge_0x00.Netflix_Original_Available_Policies')
-
-  if (cacheFullPolicies.length <= 0 && cacheOriginalPolicies <= 0) {
-    throw '没有可用策略，请先运行 「Netflix 解锁检测」脚本'
-  }
-
-  // 当前节点仅支持自制剧，且没有其他支持全部解锁的节点，则不切换
-  if (cacheFullPolicies.length <= 0 && status === STATUS_ORIGINAL_AVAILABLE) {
-    let flag = getCountryFlagEmoji(region) ?? ''
-    let regionName = REGIONS?.[region.toUpperCase()]?.chinese ?? ''
-    $.msg($.name, `${actualNode}`, `没有支持完整解锁的节点，该节点仅支持 Netflix 自制剧 ➟ ${flag} ${regionName}`)
-    return
-  }
-
-  let { policy: newPolicy, region: newRegion, status: newStatus } = cacheFullPolicies.length > 0 ? cacheFullPolicies[0] : cacheOriginalPolicies[0]
-
-  // 找到切换路径，并按照路径长度排序，取路径长度最短的
-  let switchPath = paths.filter(path => path[path.length - 1] === newPolicy).sort((m, n) => m.length - n.length)[0]
-  let switchDict = {}
-  for (let i = 0; i < switchPath.length - 1; i++) {
-    switchDict[switchPath[i]] = switchPath[i + 1]
-  }
-  await setPolicyState(switchDict)
-  console.log(`\n切换策略：${curPolicyPath.join(' ➤ ')} ➟ ${switchPath.join(' ➤ ')}`)
-  let flag = getCountryFlagEmoji(newRegion) ?? ''
-  let regionName = REGIONS?.[newRegion.toUpperCase()]?.chinese ?? ''
-  let msg =
-    newStatus === STATUS_FULL_AVAILABLE
-      ? `完整支持 Netflix ➟ ${flag} ${regionName}`
-      : `没有支持完整解锁的节点，该节点仅支持 Netflix 自制剧 ➟ ${flag} ${regionName}`
-  $.msg($.name, `${curPolicyPath[curPolicyPath.length - 1]} ➟ ${switchPath[switchPath.length - 1]}`, msg)
+  $.setval(JSON.stringify(fullAvailablePolicies), 'Helge_0x00.Netflix_Full_Available_Policies')
+  $.setval(JSON.stringify(originalAvailablePolicies), 'Helge_0x00.Netflix_Original_Available_Policies')
 })()
   .catch(error => {
     console.log(error)
@@ -117,36 +43,12 @@ let concurrency = parseInt($.getval('Helge_0x00.Netflix_Concurrency')) || 10
     $.done()
   })
 
-async function getSelectedPolicy(policyName) {
-  let message = {
-    action: 'get_policy_state',
-    content: policyName,
-  }
-
-  let ret = await sendMessage(message)
-  return ret?.[policyName]
-}
-
-async function setPolicyState(policyDict) {
-  let message = {
-    action: 'set_policy_state',
-    content: policyDict,
-  }
-  try {
-    await sendMessage(message)
-  } catch (e) {
-    if (debug) {
-      console.log(`策略切换失败：${e}`)
-    }
-    throw '策略切换失败，请重试'
-  }
-}
-
-async function testPolicies(policies = []) {
+async function testPolicies(policyName, policies = []) {
+  let failedPolicies = []
   let fullAvailablePolicies = []
   let originalAvailablePolicies = []
   let echo = results => {
-    console.log(`\n策略组检测结果：`)
+    console.log(`\n策略组 ${policyName} 检测结果：`)
     for (let { policy, status, region, time } of results) {
       switch (status) {
         case STATUS_FULL_AVAILABLE: {
@@ -159,7 +61,7 @@ async function testPolicies(policies = []) {
         case STATUS_ORIGINAL_AVAILABLE: {
           let flag = getCountryFlagEmoji(region) ?? ''
           let regionName = REGIONS?.[region.toUpperCase()]?.chinese ?? ''
-          console.log(`${policy}: 仅支持 Netflix 自制剧 ➟ ${flag}${regionName}`)
+          console.log(`${policy}: 仅支持自制剧 ➟ ${flag}${regionName}`)
           originalAvailablePolicies.push({ policy, region, status, time })
           break
         }
@@ -168,9 +70,11 @@ async function testPolicies(policies = []) {
           break
         case STATUS_TIMEOUT:
           console.log(`${policy}: 检测超时`)
+          failedPolicies.push(policy)
           break
         default:
           console.log(`${policy}: 检测异常`)
+          failedPolicies.push(policy)
       }
     }
   }
@@ -178,6 +82,12 @@ async function testPolicies(policies = []) {
   await Promise.map(policies, subPolicy => test(subPolicy), { concurrency })
     .then(echo)
     .catch(error => console.log(error))
+
+  if (retry && failedPolicies.length > 0) {
+    await Promise.map(failedPolicies, subPolicy => test(subPolicy), { concurrency })
+      .then(echo)
+      .catch(error => console.log(error))
+  }
 
   return { fullAvailablePolicies, originalAvailablePolicies }
 }
@@ -282,6 +192,9 @@ function timeout(delay = 5000) {
 }
 
 function getCountryFlagEmoji(countryCode) {
+  if (countryCode.toUpperCase() === 'TW') {
+    countryCode = 'CN'
+  }
   const codePoints = countryCode
     .toUpperCase()
     .split('')
@@ -311,35 +224,44 @@ function sendMessage(message) {
   })
 }
 
-function lookupPath(policies = {}, policyGroupName = '', curPath = [], paths = []) {
-  let targetPolicy = policies[policyGroupName]
-
-  if (targetPolicy === undefined || targetPolicy?.type === undefined || !Array.isArray(targetPolicy?.candidates)) {
-    return paths
+function lookupChildrenNode(policies = {}, targetPolicyName) {
+  let targetPolicy = policies[targetPolicyName]
+  if (!isValidPolicy(targetPolicy)) {
+    throw '策略组名未填写或填写有误，请在 BoxJS 中填写正确的策略组名称'
   }
-
-  curPath.push(policyGroupName)
-
   if (targetPolicy?.type !== 'static') {
-    paths.push([...curPath])
-    return paths
+    throw `${targetPolicyName} 不是 static 类型的策略组`
+  }
+  if (targetPolicy.candidates.length <= 0) {
+    throw `${targetPolicyName} 策略组为空`
+  }
+  let candidates = new Set()
+
+  let looked = new Set()
+  let looking = [targetPolicyName]
+
+  while (looking.length > 0) {
+    let curPolicyGroupName = looking.shift()
+    looked.add(curPolicyGroupName)
+    for (const policy of policies[curPolicyGroupName].candidates) {
+      // 排除 proxy 和 reject 两个特殊策略
+      if (policy === 'proxy' || policy === 'reject') {
+        continue
+      }
+      // 如果不是自定义策略，那么就应该是一个节点
+      if (policies[policy] === undefined) {
+        candidates.add(policy)
+        continue
+      }
+
+      // 没有遍历过的策略，也不是即将遍历的策略，并且是 static 类型的策略
+      if (!looked.has(policy) && !looking.includes(policy) && policies[policy]?.type === 'static') {
+        looking.push(policy)
+      }
+    }
   }
 
-  for (const policy of targetPolicy?.candidates) {
-    if (policies[policy] === undefined) {
-      paths.push([...curPath, policy])
-      continue
-    }
-
-    // 成环了
-    if (curPath.includes(policy)) {
-      paths.push([...curPath, policy, '⚠️', 'direct'])
-      continue
-    }
-
-    lookupPath(policies, policy, [...curPath], paths)
-  }
-  return paths
+  return [...candidates]
 }
 
 function lookupTargetPolicy(policies = {}) {
